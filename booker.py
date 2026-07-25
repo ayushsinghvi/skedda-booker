@@ -24,6 +24,8 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import requests
 from dotenv import dotenv_values
 
@@ -32,6 +34,7 @@ VENUE_SUB = CFG.get("SKEDDA_VENUE", "ksmbooking")
 APP = "https://app.skedda.com"
 VENUE = f"https://{VENUE_SUB}.skedda.com"
 BOOKING_PAGE = f"{VENUE}/booking"
+MANILA = ZoneInfo("Asia/Manila")
 SESSION_FILE = os.environ.get("SKEDDA_SESSION_FILE", ".session.json")
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120 Safari/537.36")
@@ -153,6 +156,31 @@ def load_session(path=SESSION_FILE):
     return s, ctx, data.get("saved_at")
 
 
+def following_week(run_dt=None):
+    """Return the 7 dates (Mon..Sun) of the week following the run date, Manila time.
+
+    Run on a Thursday, this yields next Monday (+4d) through next Sunday (+10d),
+    which is exactly the window that opens at Thu 9AM. Computed in Asia/Manila so
+    it stays correct even when the process runs in UTC (the cloud).
+    """
+    now = run_dt or datetime.now(MANILA)
+    today = now.date()
+    days_to_mon = (7 - today.weekday()) % 7 or 7   # always the *next* Monday
+    monday = today + timedelta(days=days_to_mon)
+    return [monday + timedelta(days=i) for i in range(7)]
+
+
+def wait_until(hms, tz=MANILA):
+    """Block until today's HH:MM:SS in the given tz. Returns immediately if past."""
+    h, m, sec = (int(x) for x in hms.split(":"))
+    now = datetime.now(tz)
+    target = now.replace(hour=h, minute=m, second=sec, microsecond=0)
+    delay = (target - now).total_seconds()
+    if delay > 0:
+        print(f"waiting {delay:.2f}s until {hms} {tz.key}...", file=sys.stderr)
+        time.sleep(delay)
+
+
 def book(s, ctx, space_id, start, end, title=None):
     """POST a single booking. start/end are local ISO strings 'YYYY-MM-DDTHH:MM:SS'."""
     payload = {"booking": {
@@ -209,9 +237,19 @@ def cmd_list_spaces():
         print(f"{sp['id']}\t{sp['name']}")
 
 
+def cmd_week():
+    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    print(f"# target week (Manila now: {datetime.now(MANILA):%Y-%m-%d %H:%M:%S %Z})",
+          file=sys.stderr)
+    for name, d in zip(days, following_week()):
+        print(f"{name}\t{d.isoformat()}")
+
+
 def cmd_book(args):
     s, ctx, saved_at = load_session()
     print(f"# using session from {saved_at}", file=sys.stderr)
+    if args.at:
+        wait_until(args.at)
     r = book(s, ctx, args.space, args.start, args.end, args.title)
     print(f"HTTP {r.status_code}")
     if r.status_code in (200, 201):
@@ -228,17 +266,22 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("login", help="authenticate and persist session to disk")
     sub.add_parser("list-spaces", help="list spaces from the saved session")
+    sub.add_parser("week", help="print the target Mon-Sun dates (Manila) for the coming week")
     b = sub.add_parser("book", help="book a slot using the saved session")
     b.add_argument("--space", required=True)
     b.add_argument("--start", required=True, help="local ISO e.g. 2026-08-15T09:00:00")
     b.add_argument("--end", required=True, help="local ISO e.g. 2026-08-15T10:00:00")
     b.add_argument("--title", default=None)
+    b.add_argument("--at", default=None,
+                   help="wait until this Manila time (HH:MM:SS) before firing, e.g. 09:00:00")
     args = ap.parse_args()
 
     if args.cmd == "login":
         cmd_login()
     elif args.cmd == "list-spaces":
         cmd_list_spaces()
+    elif args.cmd == "week":
+        cmd_week()
     elif args.cmd == "book":
         sys.exit(cmd_book(args))
 

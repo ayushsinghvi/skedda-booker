@@ -4,3 +4,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+# discovery artifacts (may contain credentials or personal data)
+discover*.json
+webs_config.json
+new_dialog_elements.json
+*.png

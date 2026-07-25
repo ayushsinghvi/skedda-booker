@@ -9,3 +9,4 @@ discover*.json
 webs_config.json
 new_dialog_elements.json
 *.png
+.session.json

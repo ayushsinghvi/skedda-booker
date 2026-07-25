@@ -35,6 +35,9 @@ APP = "https://app.skedda.com"
 VENUE = f"https://{VENUE_SUB}.skedda.com"
 BOOKING_PAGE = f"{VENUE}/booking"
 MANILA = ZoneInfo("Asia/Manila")
+COURT_1 = "1399963"   # Tennis Court 1
+COURT_2 = "1399964"   # Tennis Court 2
+COURTS = [COURT_1, COURT_2]   # court doesn't matter; try 1 then 2 at each slot
 SESSION_FILE = os.environ.get("SKEDDA_SESSION_FILE", ".session.json")
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120 Safari/537.36")
@@ -181,6 +184,148 @@ def wait_until(hms, tz=MANILA):
         time.sleep(delay)
 
 
+def weekday_target_slots(primary_day, spillover_days, times):
+    """Ordered (weekday_index, hour) ladder for a weekday target.
+
+    Primary day first, all times in preference order (we'd rather keep the day and
+    shift the hour); then spillover time-major across the allowed days (the preferred
+    hour on every spillover day before degrading to the next hour). The reserved
+    other-primary day is simply absent from `spillover_days`, so it never appears.
+    """
+    slots = [(primary_day, t) for t in times]
+    for t in times:
+        for d in spillover_days:
+            slots.append((d, t))
+    return slots
+
+
+def weekend_target_slots(days, times):
+    """Ordered (weekday_index, hour) ladder for the weekend target, time-major:
+    the preferred hour on each day before degrading to the next hour."""
+    return [(d, t) for t in times for d in days]
+
+
+def build_attempts(slots, week_monday):
+    """Expand (weekday_index, hour) slots into concrete (date, hour, space_id) attempts.
+
+    Each slot yields one attempt per court (Court 1 then Court 2), so the interleaved
+    loop advances court-by-court then candidate-by-candidate through this flat list.
+    """
+    attempts = []
+    for wd, hour in slots:
+        d = week_monday + timedelta(days=wd)
+        for court in COURTS:
+            attempts.append((d, hour, court))
+    return attempts
+
+
+def classify(status, text):
+    """Map a booking response to an outcome the interleaved loop acts on.
+
+    booked    -> 2xx, slot secured.
+    quota     -> weekly 3-booking limit hit; stop this target (retrying won't help).
+    collision -> slot already taken; advance to the next candidate/court.
+    auth      -> session expired/invalid; abort the run and re-login.
+    retry     -> anything else, INCLUDING the (unknown-in-advance) "release not open
+                 yet" error. The readiness gate relies on this residual bucket.
+
+    Error signatures captured verbatim from live probes; see the booking-window notes.
+    """
+    if status in (200, 201):
+        return "booked"
+    if status in (401, 403):
+        return "auth"
+    low = (text or "").lower()
+    if "quota is exceeded" in low or "individual maximum" in low:
+        return "quota"
+    if ("conflicts with one already scheduled" in low
+            or "conflicting bookings are not allowed" in low):
+        return "collision"
+    return "retry"
+
+
+# Finalized preferred hours, in the user's stated preference order (24h).
+WEEKDAY_TIMES = [17, 18, 16, 11, 12, 13]   # 5PM, 6PM, 4PM, 11AM, 12PM, 1PM
+WEEKEND_TIMES = [10, 11, 12, 13]           # 10AM, 11AM, 12PM, 1PM
+SPILLOVER_WEEKDAYS = [0, 2, 4]             # Mon, Wed, Fri (Tue & Thu reserved)
+
+
+def build_week_targets(monday):
+    """Assemble the three weekly targets (name, attempts) for the target week.
+
+    A: Tuesday 5PM primary; B: Thursday 5PM primary — each reserves the other's
+    day by omitting it from the shared Mon/Wed/Fri spillover. C: weekend 10AM.
+    """
+    a = weekday_target_slots(1, SPILLOVER_WEEKDAYS, WEEKDAY_TIMES)  # Tue primary
+    b = weekday_target_slots(3, SPILLOVER_WEEKDAYS, WEEKDAY_TIMES)  # Thu primary
+    c = weekend_target_slots([5, 6], WEEKEND_TIMES)                 # Sat/Sun
+    return [("A", build_attempts(a, monday)),
+            ("B", build_attempts(b, monday)),
+            ("C", build_attempts(c, monday))]
+
+
+def run_targets(targets, attempt_fn, is_expired, sleep_fn=time.sleep, tick_seconds=2):
+    """Interleaved booking loop — concurrent in effect, sequential in execution.
+
+    `targets` is a list of (name, attempts), each attempts being an ordered list of
+    (date, hour, space_id) from build_attempts(). Each tick fires ONE booking per
+    unresolved target (in list order) at its current-best candidate, then paces
+    `tick_seconds` before the next tick. Single-threaded, so the never-two-bookings-
+    on-the-same-day rule needs no locking: a booked day is recorded immediately and
+    every other target skips it.
+
+    Outcomes (see classify): booked -> done + claim the day; collision -> advance to
+    the next candidate/court; quota -> stop this target; auth -> abort; retry (incl.
+    the not-yet-released case) -> stay on the same candidate and try again next tick.
+    Runs until every target is resolved or is_expired() (the 09:05 deadline) fires.
+
+    Returns a list of {name, booked, reason} — reason in
+    {booked, collision-exhausted, quota, expired}.
+    """
+    n = len(targets)
+    idx = [0] * n
+    done = [False] * n
+    booked = [None] * n
+    reason = [None] * n
+    claimed_days = set()
+
+    def skip_claimed(i):
+        attempts = targets[i][1]
+        while idx[i] < len(attempts) and attempts[idx[i]][0] in claimed_days:
+            idx[i] += 1
+
+    while not all(done):
+        if is_expired():
+            for i in range(n):
+                if not done[i]:
+                    done[i], reason[i] = True, "expired"
+            break
+        for i, (name, attempts) in enumerate(targets):
+            if done[i]:
+                continue
+            skip_claimed(i)
+            if idx[i] >= len(attempts):
+                done[i], reason[i] = True, "exhausted"
+                continue
+            d, hour, space = attempts[idx[i]]
+            outcome = classify(*attempt_fn(d, hour, space))
+            if outcome == "booked":
+                booked[i], done[i], reason[i] = attempts[idx[i]], True, "booked"
+                claimed_days.add(d)
+            elif outcome == "collision":
+                idx[i] += 1
+            elif outcome == "quota":
+                done[i], reason[i] = True, "quota"
+            elif outcome == "auth":
+                raise RuntimeError("session expired mid-run — re-login and retry")
+            # else: retry -> leave idx[i] in place, try again next tick
+        if not all(done):
+            sleep_fn(tick_seconds)
+
+    return [{"name": targets[i][0], "booked": booked[i], "reason": reason[i]}
+            for i in range(n)]
+
+
 def book(s, ctx, space_id, start, end, title=None):
     """POST a single booking. start/end are local ISO strings 'YYYY-MM-DDTHH:MM:SS'."""
     payload = {"booking": {
@@ -261,6 +406,61 @@ def cmd_book(args):
     return 1
 
 
+DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+COURT_NAMES = {COURT_1: "Court 1", COURT_2: "Court 2"}
+
+
+def _fmt_slot(attempt):
+    d, hour, space = attempt
+    return (f"{DAY_NAMES[d.weekday()]} {d.isoformat()} "
+            f"{hour:02d}:00 {COURT_NAMES.get(space, space)}")
+
+
+def cmd_run(args):
+    """Race the weekly release: wait until the start time, then run the interleaved
+    loop over the three preferred targets until all resolve or the deadline passes."""
+    s, ctx, saved_at = load_session()
+    print(f"# using session from {saved_at}", file=sys.stderr)
+    monday = following_week()[0]
+    sunday = monday + timedelta(days=6)
+    targets = build_week_targets(monday)
+    print(f"# target week {monday.isoformat()} (Mon) .. {sunday.isoformat()} (Sun)",
+          file=sys.stderr)
+
+    if args.dry_run:
+        for name, attempts in targets:
+            print(f"Target {name}: {len(attempts)} attempts; first 6:")
+            for a in attempts[:6]:
+                print(f"  {_fmt_slot(a)}")
+        return 0
+
+    def attempt_fn(d, hour, space):
+        start = f"{d.isoformat()}T{hour:02d}:00:00"
+        end = f"{d.isoformat()}T{hour + 1:02d}:00:00"
+        r = book(s, ctx, space, start, end)
+        return r.status_code, r.text
+
+    h, m, sec = (int(x) for x in args.until.split(":"))
+    deadline = datetime.now(MANILA).replace(hour=h, minute=m, second=sec, microsecond=0)
+
+    wait_until(args.start)   # block until exactly the start time (Manila), e.g. 09:00:00
+    print(f"# firing at {datetime.now(MANILA):%H:%M:%S.%f} Manila; deadline {args.until}",
+          file=sys.stderr)
+    results = run_targets(targets, attempt_fn,
+                          is_expired=lambda: datetime.now(MANILA) >= deadline,
+                          tick_seconds=args.tick)
+
+    booked = 0
+    for r in results:
+        if r["booked"]:
+            booked += 1
+            print(f"[{r['name']}] BOOKED  {_fmt_slot(r['booked'])}")
+        else:
+            print(f"[{r['name']}] none    ({r['reason']})")
+    print(f"# {booked}/{len(results)} booked")
+    return 0 if booked else 1
+
+
 def main():
     ap = argparse.ArgumentParser(description="Skedda booker POC")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -274,6 +474,15 @@ def main():
     b.add_argument("--title", default=None)
     b.add_argument("--at", default=None,
                    help="wait until this Manila time (HH:MM:SS) before firing, e.g. 09:00:00")
+    rn = sub.add_parser("run", help="race the weekly release and book the 3 preferred slots")
+    rn.add_argument("--start", default="09:00:00",
+                    help="Manila time to begin attempts (default 09:00:00)")
+    rn.add_argument("--until", default="09:05:00",
+                    help="Manila deadline to stop trying (default 09:05:00)")
+    rn.add_argument("--tick", type=float, default=2.0,
+                    help="seconds to pace between ticks (default 2)")
+    rn.add_argument("--dry-run", action="store_true",
+                    help="print the plan and exit without booking")
     args = ap.parse_args()
 
     if args.cmd == "login":
@@ -284,6 +493,8 @@ def main():
         cmd_week()
     elif args.cmd == "book":
         sys.exit(cmd_book(args))
+    elif args.cmd == "run":
+        sys.exit(cmd_run(args))
 
 
 if __name__ == "__main__":

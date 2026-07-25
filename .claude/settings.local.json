@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -i -c /tmp/skedda_cookies.txt \"https://app.skedda.com/account/login\")",
+      "Bash(awk '{print $6}')",
+      "Bash(curl -s -o /dev/null -w \"logincontexts: %{http_code}\\\\n\" \"https://app.skedda.com/logincontexts\")",
+      "Bash(curl -s \"https://ksmbooking.skedda.com/webs\" -o /dev/null -w \"webs: %{http_code}\\\\n\")",
+      "Bash(git init *)",
+      "Bash(git commit -q -m 'Add Skedda booker POC design spec *)",
+      "Bash(python3 -c \"import requests\")",
+      "Bash(python3 -m venv .venv)",
+      "Bash(.venv/bin/pip -q install --upgrade pip requests python-dotenv)",
+      "Bash(.venv/bin/python -c \"import requests, dotenv; print\\('deps OK:', requests.__version__\\)\")",
+      "Bash(curl -s \"https://app.skedda.com/account/login\")",
+      "Bash(.venv/bin/python probe_login.py)",
+      "Bash(.venv/bin/python booker.py login)",
+      "Bash(awk '{print $1, $NF}')",
+      "Bash(.venv/bin/python -c \"import json; d=json.load\\(open\\('.session.json'\\)\\); print\\('keys:', list\\(d\\)\\); print\\('cookies:', [c['name'] for c in d['cookies']]\\); print\\('write_token len:', len\\(d['write_token']\\)\\); print\\('venue:', d['venue_id'], 'user:', d['venueuser_id'], 'spaces:', len\\(d['spaces']\\)\\)\")",
+      "Bash(.venv/bin/python booker.py list-spaces)",
+      "Bash(.venv/bin/python booker.py book --space 1399963 --start 2026-07-26T21:00:00 --end 2026-07-26T22:00:00)",
+      "Bash(git commit -q -m 'Split login from booking; persist session to disk *)",
+      "Skill(schedule)",
+      "Skill(schedule:*)",
+      "Bash(git commit -q -m 'Add Manila-anchored week math and precise --at fire primitive *)",
+      "Bash(grep -v \"^.venv$\")",
+      "Bash(grep -v \"^.git$\")",
+      "Bash(git mv *)",
+      "Bash(rm -f *.png webs_config.json new_dialog_elements.json)",
+      "Bash(grep -vE \"^\\\\.venv$|^\\\\.git$\")",
+      "Bash(git commit -q -m 'Clean up: move discovery harnesses to scripts/, remove artifacts *)"
+    ]
+  }
+}

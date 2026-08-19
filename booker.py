@@ -244,24 +244,22 @@ def classify(status, text):
     return "retry"
 
 
-# Finalized preferred hours, in the user's stated preference order (24h).
-WEEKDAY_TIMES = [17, 18, 16, 11, 12, 13]   # 5PM, 6PM, 4PM, 11AM, 12PM, 1PM
-WEEKEND_TIMES = [10, 11, 12, 13]           # 10AM, 11AM, 12PM, 1PM
-SPILLOVER_WEEKDAYS = [0, 2, 4]             # Mon, Wed, Fri (Tue & Thu reserved)
+# Preferred hours, in the user's stated preference order (24h): 10AM leads,
+# then the prior ladder.
+PREFERRED_TIMES = [10, 17, 18, 16, 11, 12, 13]  # 10AM, 5PM, 6PM, 4PM, 11AM, 12PM, 1PM
+PREFERRED_DAYS = [0, 2, 4]                       # Mon, Wed, Fri — one target per day
 
 
 def build_week_targets(monday):
     """Assemble the three weekly targets (name, attempts) for the target week.
 
-    A: Tuesday 5PM primary; B: Thursday 5PM primary — each reserves the other's
-    day by omitting it from the shared Mon/Wed/Fri spillover. C: weekend 10AM.
+    One target per preferred day (Mon, Wed, Fri). Each stays pinned to its own
+    day — no cross-day spillover — so the three bookings land one-per-day, and
+    within the day degrade down the PREFERRED_TIMES ladder (10AM first).
     """
-    a = weekday_target_slots(1, SPILLOVER_WEEKDAYS, WEEKDAY_TIMES)  # Tue primary
-    b = weekday_target_slots(3, SPILLOVER_WEEKDAYS, WEEKDAY_TIMES)  # Thu primary
-    c = weekend_target_slots([5, 6], WEEKEND_TIMES)                 # Sat/Sun
-    return [("A", build_attempts(a, monday)),
-            ("B", build_attempts(b, monday)),
-            ("C", build_attempts(c, monday))]
+    names = ["A", "B", "C"]
+    return [(name, build_attempts(weekday_target_slots(day, [], PREFERRED_TIMES), monday))
+            for name, day in zip(names, PREFERRED_DAYS)]
 
 
 def run_targets(targets, attempt_fn, is_expired, sleep_fn=time.sleep, tick_seconds=2):

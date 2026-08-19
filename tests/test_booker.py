@@ -182,17 +182,18 @@ class BuildWeekTargetsTest(unittest.TestCase):
     def test_three_targets_named_A_B_C(self):
         self.assertEqual([t[0] for t in self.targets], ["A", "B", "C"])
 
-    def test_primary_first_attempts_are_tue5pm_thu5pm_sat10am_on_court1(self):
+    def test_primary_first_attempts_are_mon_wed_fri_10am_on_court1(self):
         firsts = {name: attempts[0] for name, attempts in self.targets}
-        self.assertEqual(firsts["A"], (date(2026, 8, 4), 17, booker.COURT_1))  # Tue 5PM
-        self.assertEqual(firsts["B"], (date(2026, 8, 6), 17, booker.COURT_1))  # Thu 5PM
-        self.assertEqual(firsts["C"], (date(2026, 8, 8), 10, booker.COURT_1))  # Sat 10AM
+        self.assertEqual(firsts["A"], (date(2026, 8, 3), 10, booker.COURT_1))  # Mon 10AM
+        self.assertEqual(firsts["B"], (date(2026, 8, 5), 10, booker.COURT_1))  # Wed 10AM
+        self.assertEqual(firsts["C"], (date(2026, 8, 7), 10, booker.COURT_1))  # Fri 10AM
 
-    def test_weekday_targets_reserve_each_others_primary_day(self):
-        a_days = {d.weekday() for d, _, _ in dict(self.targets)["A"]}
-        b_days = {d.weekday() for d, _, _ in dict(self.targets)["B"]}
-        self.assertNotIn(3, a_days)  # A never touches Thursday (reserved for B)
-        self.assertNotIn(1, b_days)  # B never touches Tuesday (reserved for A)
+    def test_each_target_stays_pinned_to_its_own_day(self):
+        days = {name: {d.weekday() for d, _, _ in attempts}
+                for name, attempts in self.targets}
+        self.assertEqual(days["A"], {0})  # Monday only
+        self.assertEqual(days["B"], {2})  # Wednesday only
+        self.assertEqual(days["C"], {4})  # Friday only
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Tests for the interleaved booking loop and its pure helpers."""
+"""Tests for the multi-account interleaved booking loop and its pure helpers."""
 import os
 import sys
 import unittest
@@ -11,32 +11,24 @@ import booker
 MON = date(2026, 8, 3)  # a Monday; the target-week anchor used across tests
 
 
-class WeekdayTargetSlotsTest(unittest.TestCase):
-    def test_primary_day_times_come_first_in_preference_order(self):
-        slots = booker.weekday_target_slots(
-            primary_day=1, spillover_days=[0, 2, 4], times=[17, 18, 16, 11, 12, 13])
-        self.assertEqual(slots[:6],
-                         [(1, 17), (1, 18), (1, 16), (1, 11), (1, 12), (1, 13)])
+class LoadAccountsTest(unittest.TestCase):
+    def test_reads_numbered_email_password_pairs_in_order(self):
+        cfg = {
+            "SKEDDA_EMAIL_1": "a@x.com", "SKEDDA_PASSWORD_1": "p1",
+            "SKEDDA_EMAIL_2": "b@x.com", "SKEDDA_PASSWORD_2": "p2",
+            "SKEDDA_EMAIL_3": "c@x.com", "SKEDDA_PASSWORD_3": "p3",
+        }
+        accounts = booker.load_accounts(cfg)
+        self.assertEqual([a["account"] for a in accounts], [1, 2, 3])
+        self.assertEqual(accounts[0]["email"], "a@x.com")
+        self.assertEqual(accounts[0]["password"], "p1")
+        self.assertEqual(accounts[2]["email"], "c@x.com")
 
-    def test_spillover_is_time_major_across_days(self):
-        slots = booker.weekday_target_slots(
-            primary_day=1, spillover_days=[0, 2, 4], times=[17, 18, 16, 11, 12, 13])
-        # After the 6 primary-day slots: 5PM across Mon/Wed/Fri before any 6PM slot.
-        self.assertEqual(slots[6:9], [(0, 17), (2, 17), (4, 17)])
-        self.assertEqual(slots[9:12], [(0, 18), (2, 18), (4, 18)])
-
-    def test_spillover_never_uses_the_reserved_other_primary_day(self):
-        # Target A reserves Thu (3) for Target B: it must never appear.
-        slots = booker.weekday_target_slots(
-            primary_day=1, spillover_days=[0, 2, 4], times=[17, 18, 16, 11, 12, 13])
-        self.assertFalse(any(day == 3 for day, _ in slots))
-
-
-class WeekendTargetSlotsTest(unittest.TestCase):
-    def test_time_major_across_saturday_then_sunday(self):
-        slots = booker.weekend_target_slots(days=[5, 6], times=[10, 11, 12, 13])
-        self.assertEqual(slots, [(5, 10), (6, 10), (5, 11), (6, 11),
-                                 (5, 12), (6, 12), (5, 13), (6, 13)])
+    def test_stops_at_first_missing_index(self):
+        cfg = {"SKEDDA_EMAIL_1": "a@x.com", "SKEDDA_PASSWORD_1": "p1",
+               "SKEDDA_EMAIL_3": "c@x.com", "SKEDDA_PASSWORD_3": "p3"}
+        accounts = booker.load_accounts(cfg)
+        self.assertEqual([a["account"] for a in accounts], [1])
 
 
 class BuildAttemptsTest(unittest.TestCase):
@@ -78,8 +70,8 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(booker.classify(403, ""), "auth")
 
 
-TUE, WED, THU, FRI = (date(2026, 8, 4), date(2026, 8, 5),
-                      date(2026, 8, 6), date(2026, 8, 7))
+MON_D, TUE, WED, FRI = (date(2026, 8, 3), date(2026, 8, 4),
+                        date(2026, 8, 5), date(2026, 8, 7))
 OK = (200, "")
 COLLISION = (422, COLLISION_MSG)
 QUOTA = (422, QUOTA_MSG)
@@ -110,34 +102,50 @@ class RunTargetsTest(unittest.TestCase):
 
     def test_books_first_attempt_and_stops_without_sleeping(self):
         results = booker.run_targets(
-            [("A", [(TUE, 17, booker.COURT_1)])],
-            attempt_fn=lambda d, h, s: OK,
+            [("Tue 17:00", 1, [(TUE, 17, booker.COURT_1)])],
+            attempt_fn=lambda acct, d, h, s: OK,
             is_expired=NeverExpires(), sleep_fn=self.sleep)
         self.assertEqual(results[0]["booked"], (TUE, 17, booker.COURT_1))
         self.assertEqual(results[0]["reason"], "booked")
+        self.assertEqual(results[0]["account"], 1)
         self.assertEqual(self.slept, [])  # all done on first pass -> never paced
 
-    def test_never_books_two_targets_on_the_same_day(self):
-        # Both targets' best attempt is Wed; A grabs it, B must fall to Fri.
+    def test_dispatches_each_target_to_its_own_account(self):
+        seen = []
+
+        def attempt(acct, d, h, s):
+            seen.append((acct, d, h))
+            return OK
+
+        booker.run_targets(
+            [("Tue 10:00", 1, [(TUE, 10, booker.COURT_1)]),
+             ("Mon 09:00", 2, [(MON_D, 9, booker.COURT_1)])],
+            attempt_fn=attempt, is_expired=NeverExpires(), sleep_fn=self.sleep)
+        self.assertIn((1, TUE, 10), seen)
+        self.assertIn((2, MON_D, 9), seen)
+
+    def test_allows_two_bookings_on_the_same_day(self):
+        # Account 1 books Tue 10:00 and Tue 17:00 — both must succeed (no
+        # one-per-day exclusion any more).
         targets = [
-            ("A", [(WED, 17, booker.COURT_1)]),
-            ("B", [(WED, 17, booker.COURT_1), (FRI, 17, booker.COURT_1)]),
+            ("Tue 10:00", 1, [(TUE, 10, booker.COURT_1)]),
+            ("Tue 17:00", 1, [(TUE, 17, booker.COURT_1)]),
         ]
         results = booker.run_targets(
-            targets, attempt_fn=lambda d, h, s: OK,
+            targets, attempt_fn=lambda acct, d, h, s: OK,
             is_expired=NeverExpires(), sleep_fn=self.sleep)
-        self.assertEqual(results[0]["booked"], (WED, 17, booker.COURT_1))
-        self.assertEqual(results[1]["booked"], (FRI, 17, booker.COURT_1))
+        self.assertEqual(results[0]["booked"], (TUE, 10, booker.COURT_1))
+        self.assertEqual(results[1]["booked"], (TUE, 17, booker.COURT_1))
 
     def test_collision_advances_to_the_other_court(self):
         calls = []
 
-        def attempt(d, h, s):
+        def attempt(acct, d, h, s):
             calls.append(s)
             return COLLISION if s == booker.COURT_1 else OK
 
         results = booker.run_targets(
-            [("A", [(TUE, 17, booker.COURT_1), (TUE, 17, booker.COURT_2)])],
+            [("Tue 17:00", 1, [(TUE, 17, booker.COURT_1), (TUE, 17, booker.COURT_2)])],
             attempt_fn=attempt, is_expired=NeverExpires(), sleep_fn=self.sleep)
         self.assertEqual(results[0]["booked"], (TUE, 17, booker.COURT_2))
         self.assertEqual(calls, [booker.COURT_1, booker.COURT_2])
@@ -146,12 +154,12 @@ class RunTargetsTest(unittest.TestCase):
     def test_retries_while_release_not_open_then_books_when_it_opens(self):
         state = {"n": 0}
 
-        def attempt(d, h, s):
+        def attempt(acct, d, h, s):
             state["n"] += 1
             return NOT_OPEN if state["n"] < 3 else OK
 
         results = booker.run_targets(
-            [("A", [(TUE, 17, booker.COURT_1)])],
+            [("Tue 17:00", 1, [(TUE, 17, booker.COURT_1)])],
             attempt_fn=attempt, is_expired=NeverExpires(),
             sleep_fn=self.sleep, tick_seconds=2)
         self.assertEqual(results[0]["reason"], "booked")
@@ -160,16 +168,16 @@ class RunTargetsTest(unittest.TestCase):
 
     def test_quota_stops_target_without_booking(self):
         results = booker.run_targets(
-            [("A", [(TUE, 17, booker.COURT_1)])],
-            attempt_fn=lambda d, h, s: QUOTA,
+            [("Tue 17:00", 1, [(TUE, 17, booker.COURT_1)])],
+            attempt_fn=lambda acct, d, h, s: QUOTA,
             is_expired=NeverExpires(), sleep_fn=self.sleep)
         self.assertIsNone(results[0]["booked"])
         self.assertEqual(results[0]["reason"], "quota")
 
     def test_gives_up_at_deadline_with_expired_reason(self):
         results = booker.run_targets(
-            [("A", [(TUE, 17, booker.COURT_1)])],
-            attempt_fn=lambda d, h, s: NOT_OPEN,
+            [("Tue 17:00", 1, [(TUE, 17, booker.COURT_1)])],
+            attempt_fn=lambda acct, d, h, s: NOT_OPEN,
             is_expired=ExpiresAfter(3), sleep_fn=self.sleep)
         self.assertIsNone(results[0]["booked"])
         self.assertEqual(results[0]["reason"], "expired")
@@ -179,21 +187,37 @@ class BuildWeekTargetsTest(unittest.TestCase):
     def setUp(self):
         self.targets = booker.build_week_targets(MON)  # MON = 2026-08-03
 
-    def test_three_targets_named_A_B_C(self):
-        self.assertEqual([t[0] for t in self.targets], ["A", "B", "C"])
+    def test_one_target_per_plan_entry(self):
+        self.assertEqual(len(self.targets), len(booker.WEEKLY_PLAN))
 
-    def test_primary_first_attempts_are_mon_wed_fri_10am_on_court1(self):
-        firsts = {name: attempts[0] for name, attempts in self.targets}
-        self.assertEqual(firsts["A"], (date(2026, 8, 3), 10, booker.COURT_1))  # Mon 10AM
-        self.assertEqual(firsts["B"], (date(2026, 8, 5), 10, booker.COURT_1))  # Wed 10AM
-        self.assertEqual(firsts["C"], (date(2026, 8, 7), 10, booker.COURT_1))  # Fri 10AM
+    def test_each_target_is_name_account_attempts(self):
+        name, account, attempts = self.targets[0]
+        self.assertIsInstance(name, str)
+        self.assertIsInstance(account, int)
+        self.assertIsInstance(attempts, list)
 
-    def test_each_target_stays_pinned_to_its_own_day(self):
-        days = {name: {d.weekday() for d, _, _ in attempts}
-                for name, attempts in self.targets}
-        self.assertEqual(days["A"], {0})  # Monday only
-        self.assertEqual(days["B"], {2})  # Wednesday only
-        self.assertEqual(days["C"], {4})  # Friday only
+    def test_account_assignments_match_the_plan(self):
+        # (weekday, hour) -> account, as specified by the user.
+        by_slot = {(attempts[0][0].weekday(), attempts[0][1]): account
+                   for _, account, attempts in self.targets}
+        self.assertEqual(by_slot[(0, 9)], 2)    # Mon 09:00 -> A2
+        self.assertEqual(by_slot[(1, 10)], 1)   # Tue 10:00 -> A1
+        self.assertEqual(by_slot[(1, 17)], 1)   # Tue 17:00 -> A1
+        self.assertEqual(by_slot[(2, 10)], 1)   # Wed 10:00 -> A1
+        self.assertEqual(by_slot[(4, 16)], 2)   # Fri 16:00 -> A2
+        self.assertEqual(by_slot[(5, 17)], 2)   # Sat 17:00 -> A2
+        self.assertEqual(by_slot[(6, 10)], 3)   # Sun 10:00 -> A3
+
+    def test_each_target_tries_court1_then_court2(self):
+        for _, _, attempts in self.targets:
+            self.assertEqual([a[2] for a in attempts],
+                             [booker.COURT_1, booker.COURT_2])
+
+    def test_no_account_exceeds_the_weekly_quota_of_three(self):
+        counts = {}
+        for _, account, _ in self.targets:
+            counts[account] = counts.get(account, 0) + 1
+        self.assertTrue(all(c <= 3 for c in counts.values()), counts)
 
 
 if __name__ == "__main__":

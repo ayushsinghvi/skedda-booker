@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Skedda booker — POC.
+"""Skedda booker.
 
 Logs into a private Skedda venue and submits bookings via the JSON API (no browser).
-Login is decoupled from booking: `login` authenticates once and persists the session
-(auth cookies + antiforgery token + venue context) to disk; `book` and `list-spaces`
-load that saved session and skip the login round-trips entirely.
+Login is decoupled from booking: `login` authenticates every configured account
+(SKEDDA_EMAIL_1/SKEDDA_PASSWORD_1, _2, _3, ... in .env, sharing one SKEDDA_VENUE) and
+persists all their sessions (auth cookies + antiforgery token + venue context) to disk;
+`book`, `list-spaces`, and `run` load those saved sessions and skip the login round-trips.
+
+`run` fires WEEKLY_PLAN — an explicit sequence of (weekday, hour, account) slots — as an
+interleaved race at the weekly release, dispatching each slot's booking to its assigned
+account (each account capped at Skedda's 3-bookings-per-week quota).
 
 Discovered contract for Kerry Sports Manila (ksmbooking):
   login:  GET  app.skedda.com/account/login         -> antiforgery cookie + token
@@ -14,9 +19,12 @@ Discovered contract for Kerry Sports Manila (ksmbooking):
   write:  POST ksmbooking.skedda.com/bookings (JSON, X-Skedda-RequestVerificationToken)
 
 Usage:
-  python booker.py login            # authenticate and persist session to .session.json
-  python booker.py list-spaces      # uses the saved session
-  python booker.py book --space 1399963 --start 2026-08-15T09:00:00 --end 2026-08-15T10:00:00
+  python booker.py login                    # authenticate all accounts -> .session.json
+  python booker.py list-spaces [--account N]  # uses a saved account session (default 1)
+  python booker.py run --dry-run            # print the multi-account plan and exit
+  python booker.py run                       # race the release and book the planned slots
+  python booker.py book --account 1 --space 1399963 \
+      --start 2026-08-15T09:00:00 --end 2026-08-15T10:00:00
 """
 import argparse
 import json
@@ -50,6 +58,25 @@ def new_session():
     s = requests.Session()
     s.headers.update({"User-Agent": UA})
     return s
+
+
+def load_accounts(cfg=CFG):
+    """Read numbered account credentials from config into an ordered list.
+
+    Looks for SKEDDA_EMAIL_1/SKEDDA_PASSWORD_1, _2, _3, ... and stops at the first
+    missing index. The venue (SKEDDA_VENUE) is shared across all accounts. Returns
+    [{"account": 1, "email": ..., "password": ...}, ...].
+    """
+    accounts = []
+    i = 1
+    while True:
+        email = cfg.get(f"SKEDDA_EMAIL_{i}")
+        password = cfg.get(f"SKEDDA_PASSWORD_{i}")
+        if not email or not password:
+            break
+        accounts.append({"account": i, "email": email, "password": password})
+        i += 1
+    return accounts
 
 
 def _scrape_token(html):
@@ -120,43 +147,51 @@ def get_context(s):
     }
 
 
-def save_session(s, ctx, path=SESSION_FILE):
-    """Persist auth cookies + antiforgery token + venue context to disk.
+def save_sessions(entries, path=SESSION_FILE):
+    """Persist one or more authenticated accounts to disk under a single file.
 
-    The file contains live auth cookies, so it is written with 0600 permissions
-    and must stay git-ignored.
+    `entries` is a list of (account, email, session, ctx). The file contains live
+    auth cookies, so it is written with 0600 permissions and must stay git-ignored.
     """
     data = {
         "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "cookies": [{"name": c.name, "value": c.value,
-                     "domain": c.domain, "path": c.path} for c in s.cookies],
-        "write_token": ctx["write_token"],
-        "venue_id": ctx["venue_id"],
-        "venueuser_id": ctx["venueuser_id"],
-        "timezone": ctx.get("timezone"),
-        "spaces": ctx.get("spaces", []),
+        "accounts": [{
+            "account": account,
+            "email": email,
+            "cookies": [{"name": c.name, "value": c.value,
+                         "domain": c.domain, "path": c.path} for c in s.cookies],
+            "write_token": ctx["write_token"],
+            "venue_id": ctx["venue_id"],
+            "venueuser_id": ctx["venueuser_id"],
+            "timezone": ctx.get("timezone"),
+            "spaces": ctx.get("spaces", []),
+        } for account, email, s, ctx in entries],
     }
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
     os.chmod(path, 0o600)
 
 
-def load_session(path=SESSION_FILE):
-    """Rebuild a requests.Session + ctx from a saved session file.
+def load_sessions(path=SESSION_FILE):
+    """Rebuild per-account (session, ctx) from a saved session file.
 
+    Returns (sessions, saved_at) where sessions maps account -> (email, session, ctx).
     Exits with guidance if no session exists yet. Does NOT contact the network.
     """
     if not os.path.exists(path):
         raise SystemExit(f"No saved session at {path}. Run: python booker.py login")
     with open(path) as f:
         data = json.load(f)
-    s = new_session()
-    for c in data.get("cookies", []):
-        s.cookies.set(c["name"], c["value"],
-                      domain=c.get("domain"), path=c.get("path", "/"))
-    ctx = {k: data.get(k) for k in
-           ("write_token", "venue_id", "venueuser_id", "timezone", "spaces")}
-    return s, ctx, data.get("saved_at")
+    sessions = {}
+    for a in data.get("accounts", []):
+        s = new_session()
+        for c in a.get("cookies", []):
+            s.cookies.set(c["name"], c["value"],
+                          domain=c.get("domain"), path=c.get("path", "/"))
+        ctx = {k: a.get(k) for k in
+               ("write_token", "venue_id", "venueuser_id", "timezone", "spaces")}
+        sessions[a["account"]] = (a.get("email"), s, ctx)
+    return sessions, data.get("saved_at")
 
 
 def following_week(run_dt=None):
@@ -182,27 +217,6 @@ def wait_until(hms, tz=MANILA):
     if delay > 0:
         print(f"waiting {delay:.2f}s until {hms} {tz.key}...", file=sys.stderr)
         time.sleep(delay)
-
-
-def weekday_target_slots(primary_day, spillover_days, times):
-    """Ordered (weekday_index, hour) ladder for a weekday target.
-
-    Primary day first, all times in preference order (we'd rather keep the day and
-    shift the hour); then spillover time-major across the allowed days (the preferred
-    hour on every spillover day before degrading to the next hour). The reserved
-    other-primary day is simply absent from `spillover_days`, so it never appears.
-    """
-    slots = [(primary_day, t) for t in times]
-    for t in times:
-        for d in spillover_days:
-            slots.append((d, t))
-    return slots
-
-
-def weekend_target_slots(days, times):
-    """Ordered (weekday_index, hour) ladder for the weekend target, time-major:
-    the preferred hour on each day before degrading to the next hour."""
-    return [(d, t) for t in times for d in days]
 
 
 def build_attempts(slots, week_monday):
@@ -244,53 +258,58 @@ def classify(status, text):
     return "retry"
 
 
-# Preferred hours, in the user's stated preference order (24h): 10AM leads,
-# then the prior ladder.
-PREFERRED_TIMES = [10, 17, 18, 16, 11, 12, 13]  # 10AM, 5PM, 6PM, 4PM, 11AM, 12PM, 1PM
-PREFERRED_DAYS = [0, 2, 4]                       # Mon, Wed, Fri — one target per day
+# The weekly booking plan: an explicit, ordered sequence of (weekday, hour, account)
+# assignments. weekday uses date.weekday() (Mon=0 .. Sun=6); account is 1-based into
+# the accounts list from load_accounts(). Each account may hold at most 3 bookings/week
+# (Skedda quota), so no account appears more than three times below.
+WEEKLY_PLAN = [
+    (0, 9,  2),   # Mon 09:00 — Account 2
+    (1, 10, 1),   # Tue 10:00 — Account 1
+    (1, 17, 1),   # Tue 17:00 — Account 1
+    (2, 10, 1),   # Wed 10:00 — Account 1
+    (4, 16, 2),   # Fri 16:00 — Account 2
+    (5, 17, 2),   # Sat 17:00 — Account 2
+    (6, 10, 3),   # Sun 10:00 — Account 3
+]
 
 
 def build_week_targets(monday):
-    """Assemble the three weekly targets (name, attempts) for the target week.
+    """Expand WEEKLY_PLAN into (name, account, attempts) targets for the target week.
 
-    One target per preferred day (Mon, Wed, Fri). Each stays pinned to its own
-    day — no cross-day spillover — so the three bookings land one-per-day, and
-    within the day degrade down the PREFERRED_TIMES ladder (10AM first).
+    Each plan entry becomes one target owning a single (day, hour) slot; attempts are
+    the two courts tried in order (Court 1 then Court 2). The account travels with the
+    target so the run loop dispatches its bookings to the right session. Distinct slots
+    are guaranteed by the plan, so there is no cross-target day exclusion — one account
+    can legitimately hold two slots on the same day.
     """
-    names = ["A", "B", "C"]
-    return [(name, build_attempts(weekday_target_slots(day, [], PREFERRED_TIMES), monday))
-            for name, day in zip(names, PREFERRED_DAYS)]
+    return [(f"{DAY_NAMES[wd]} {hour:02d}:00", account,
+             build_attempts([(wd, hour)], monday))
+            for wd, hour, account in WEEKLY_PLAN]
 
 
 def run_targets(targets, attempt_fn, is_expired, sleep_fn=time.sleep, tick_seconds=2):
     """Interleaved booking loop — concurrent in effect, sequential in execution.
 
-    `targets` is a list of (name, attempts), each attempts being an ordered list of
+    `targets` is a list of (name, account, attempts); attempts is an ordered list of
     (date, hour, space_id) from build_attempts(). Each tick fires ONE booking per
-    unresolved target (in list order) at its current-best candidate, then paces
-    `tick_seconds` before the next tick. Single-threaded, so the never-two-bookings-
-    on-the-same-day rule needs no locking: a booked day is recorded immediately and
-    every other target skips it.
+    unresolved target (in list order) at its current-best candidate via
+    attempt_fn(account, date, hour, space_id), then paces `tick_seconds` before the
+    next tick. Slots are pre-assigned distinct by the plan, so no cross-target day
+    exclusion is needed — one account may hold two slots on the same day.
 
-    Outcomes (see classify): booked -> done + claim the day; collision -> advance to
-    the next candidate/court; quota -> stop this target; auth -> abort; retry (incl.
-    the not-yet-released case) -> stay on the same candidate and try again next tick.
-    Runs until every target is resolved or is_expired() (the 09:05 deadline) fires.
+    Outcomes (see classify): booked -> done; collision -> advance to the next court;
+    quota -> stop this target; auth -> abort; retry (incl. the not-yet-released case)
+    -> stay on the same candidate and try again next tick. Runs until every target is
+    resolved or is_expired() (the deadline) fires.
 
-    Returns a list of {name, booked, reason} — reason in
-    {booked, collision-exhausted, quota, expired}.
+    Returns a list of {name, account, booked, reason} — reason in
+    {booked, exhausted, quota, expired}.
     """
     n = len(targets)
     idx = [0] * n
     done = [False] * n
     booked = [None] * n
     reason = [None] * n
-    claimed_days = set()
-
-    def skip_claimed(i):
-        attempts = targets[i][1]
-        while idx[i] < len(attempts) and attempts[idx[i]][0] in claimed_days:
-            idx[i] += 1
 
     while not all(done):
         if is_expired():
@@ -298,18 +317,16 @@ def run_targets(targets, attempt_fn, is_expired, sleep_fn=time.sleep, tick_secon
                 if not done[i]:
                     done[i], reason[i] = True, "expired"
             break
-        for i, (name, attempts) in enumerate(targets):
+        for i, (name, account, attempts) in enumerate(targets):
             if done[i]:
                 continue
-            skip_claimed(i)
             if idx[i] >= len(attempts):
                 done[i], reason[i] = True, "exhausted"
                 continue
             d, hour, space = attempts[idx[i]]
-            outcome = classify(*attempt_fn(d, hour, space))
+            outcome = classify(*attempt_fn(account, d, hour, space))
             if outcome == "booked":
                 booked[i], done[i], reason[i] = attempts[idx[i]], True, "booked"
-                claimed_days.add(d)
             elif outcome == "collision":
                 idx[i] += 1
             elif outcome == "quota":
@@ -320,7 +337,8 @@ def run_targets(targets, attempt_fn, is_expired, sleep_fn=time.sleep, tick_secon
         if not all(done):
             sleep_fn(tick_seconds)
 
-    return [{"name": targets[i][0], "booked": booked[i], "reason": reason[i]}
+    return [{"name": targets[i][0], "account": targets[i][1],
+             "booked": booked[i], "reason": reason[i]}
             for i in range(n)]
 
 
@@ -361,21 +379,34 @@ def _extract_error(text):
 
 
 def cmd_login():
-    email, password = CFG["SKEDDA_EMAIL"], CFG["SKEDDA_PASSWORD"]
-    s = new_session()
-    print("logging in...", file=sys.stderr)
-    login(s, email, password)
-    ctx = get_context(s)
-    if not ctx["write_token"]:
-        raise SystemExit("login succeeded but no write token was obtained")
-    save_session(s, ctx)
-    print(f"session saved to {SESSION_FILE} "
-          f"(venue={ctx['venue_id']} user={ctx['venueuser_id']} tz={ctx['timezone']})")
+    accounts = load_accounts()
+    if not accounts:
+        raise SystemExit("no accounts configured — set SKEDDA_EMAIL_1/SKEDDA_PASSWORD_1 "
+                         "(and _2, _3, ...) in .env")
+    entries = []
+    for a in accounts:
+        print(f"logging in account {a['account']} ({a['email']})...", file=sys.stderr)
+        s = new_session()
+        login(s, a["email"], a["password"])
+        ctx = get_context(s)
+        if not ctx["write_token"]:
+            raise SystemExit(f"account {a['account']} login succeeded but no write "
+                             f"token was obtained")
+        entries.append((a["account"], a["email"], s, ctx))
+    save_sessions(entries)
+    print(f"{len(entries)} session(s) saved to {SESSION_FILE}:")
+    for account, email, _, ctx in entries:
+        print(f"  account {account} ({email}): venue={ctx['venue_id']} "
+              f"user={ctx['venueuser_id']} tz={ctx['timezone']}")
 
 
-def cmd_list_spaces():
-    _, ctx, saved_at = load_session()
+def cmd_list_spaces(args):
+    sessions, saved_at = load_sessions()
     print(f"# session from {saved_at}", file=sys.stderr)
+    if args.account not in sessions:
+        raise SystemExit(f"account {args.account} not in saved session "
+                         f"(have: {sorted(sessions)})")
+    _, _, ctx = sessions[args.account]
     for sp in ctx["spaces"]:
         print(f"{sp['id']}\t{sp['name']}")
 
@@ -389,8 +420,12 @@ def cmd_week():
 
 
 def cmd_book(args):
-    s, ctx, saved_at = load_session()
-    print(f"# using session from {saved_at}", file=sys.stderr)
+    sessions, saved_at = load_sessions()
+    print(f"# using session from {saved_at} (account {args.account})", file=sys.stderr)
+    if args.account not in sessions:
+        raise SystemExit(f"account {args.account} not in saved session "
+                         f"(have: {sorted(sessions)})")
+    _, s, ctx = sessions[args.account]
     if args.at:
         wait_until(args.at)
     r = book(s, ctx, args.space, args.start, args.end, args.title)
@@ -416,9 +451,10 @@ def _fmt_slot(attempt):
 
 def cmd_run(args):
     """Race the weekly release: wait until the start time, then run the interleaved
-    loop over the three preferred targets until all resolve or the deadline passes."""
-    s, ctx, saved_at = load_session()
-    print(f"# using session from {saved_at}", file=sys.stderr)
+    loop over every planned target (across all accounts) until all resolve or the
+    deadline passes. Each target's bookings go to its assigned account's session."""
+    sessions, saved_at = load_sessions()
+    print(f"# using session from {saved_at} ({len(sessions)} account(s))", file=sys.stderr)
     monday = following_week()[0]
     sunday = monday + timedelta(days=6)
     targets = build_week_targets(monday)
@@ -426,13 +462,19 @@ def cmd_run(args):
           file=sys.stderr)
 
     if args.dry_run:
-        for name, attempts in targets:
-            print(f"Target {name}: {len(attempts)} attempts; first 6:")
-            for a in attempts[:6]:
-                print(f"  {_fmt_slot(a)}")
+        for name, account, attempts in targets:
+            print(f"[A{account}] {name}: "
+                  f"{', '.join(COURT_NAMES.get(a[2], a[2]) for a in attempts)}")
         return 0
 
-    def attempt_fn(d, hour, space):
+    needed = {account for _, account, _ in targets}
+    missing = needed - set(sessions)
+    if missing:
+        raise SystemExit(f"plan needs account(s) {sorted(missing)} but the saved "
+                         f"session only has {sorted(sessions)}. Run: python booker.py login")
+
+    def attempt_fn(account, d, hour, space):
+        _, s, ctx = sessions[account]
         start = f"{d.isoformat()}T{hour:02d}:00:00"
         end = f"{d.isoformat()}T{hour + 1:02d}:00:00"
         r = book(s, ctx, space, start, end)
@@ -452,9 +494,9 @@ def cmd_run(args):
     for r in results:
         if r["booked"]:
             booked += 1
-            print(f"[{r['name']}] BOOKED  {_fmt_slot(r['booked'])}")
+            print(f"[A{r['account']}] BOOKED  {_fmt_slot(r['booked'])}")
         else:
-            print(f"[{r['name']}] none    ({r['reason']})")
+            print(f"[A{r['account']}] none    {r['name']} ({r['reason']})")
     print(f"# {booked}/{len(results)} booked")
     return 0 if booked else 1
 
@@ -462,17 +504,22 @@ def cmd_run(args):
 def main():
     ap = argparse.ArgumentParser(description="Skedda booker POC")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("login", help="authenticate and persist session to disk")
-    sub.add_parser("list-spaces", help="list spaces from the saved session")
+    sub.add_parser("login", help="authenticate all configured accounts and persist to disk")
+    ls = sub.add_parser("list-spaces", help="list spaces from a saved account session")
+    ls.add_argument("--account", type=int, default=1,
+                    help="which saved account to read (default 1)")
     sub.add_parser("week", help="print the target Mon-Sun dates (Manila) for the coming week")
-    b = sub.add_parser("book", help="book a slot using the saved session")
+    b = sub.add_parser("book", help="book a slot using a saved account session")
     b.add_argument("--space", required=True)
     b.add_argument("--start", required=True, help="local ISO e.g. 2026-08-15T09:00:00")
     b.add_argument("--end", required=True, help="local ISO e.g. 2026-08-15T10:00:00")
     b.add_argument("--title", default=None)
+    b.add_argument("--account", type=int, default=1,
+                   help="which saved account to book with (default 1)")
     b.add_argument("--at", default=None,
                    help="wait until this Manila time (HH:MM:SS) before firing, e.g. 09:00:00")
-    rn = sub.add_parser("run", help="race the weekly release and book the 3 preferred slots")
+    rn = sub.add_parser("run", help="race the weekly release and book the planned slots "
+                                    "across all accounts")
     rn.add_argument("--start", default="09:00:00",
                     help="Manila time to begin attempts (default 09:00:00)")
     rn.add_argument("--until", default="09:05:00",
@@ -486,7 +533,7 @@ def main():
     if args.cmd == "login":
         cmd_login()
     elif args.cmd == "list-spaces":
-        cmd_list_spaces()
+        cmd_list_spaces(args)
     elif args.cmd == "week":
         cmd_week()
     elif args.cmd == "book":

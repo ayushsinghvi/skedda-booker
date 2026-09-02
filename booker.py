@@ -263,14 +263,14 @@ def classify(status, text):
 # the accounts list from load_accounts(). Each account may hold at most 3 bookings/week
 # (Skedda quota), so no account appears more than three times below.
 WEEKLY_PLAN = [
-    (0, 10, 1),   # Mon 10:00 — Account 1
-    (0, 17, 2),   # Mon 17:00 — Account 2
+    (1, 16, 1),   # Tue 16:00 — Account 1
     (1, 17, 1),   # Tue 17:00 — Account 1
-    (2, 10, 1),   # Wed 10:00 — Account 1
-    (4, 16, 2),   # Fri 16:00 — Account 2
-    (5, 10, 3),   # Sat 10:00 — Account 3
-    (5, 17, 2),   # Sat 17:00 — Account 2
-    (6, 10, 3),   # Sun 10:00 — Account 3
+    (2, 9,  1),   # Wed 09:00 — Account 1
+    (3, 16, 2),   # Thu 16:00 — Account 2
+    (3, 17, 2),   # Thu 17:00 — Account 2
+    (5, 10, 2),   # Sat 10:00 — Account 2
+    (5, 11, 3),   # Sat 11:00 — Account 3
+    (5, 17, 3),   # Sat 17:00 — Account 3
 ]
 
 

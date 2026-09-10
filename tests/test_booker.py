@@ -35,8 +35,8 @@ class BuildAttemptsTest(unittest.TestCase):
     def test_maps_weekday_index_to_date_and_expands_both_courts(self):
         attempts = booker.build_attempts([(1, 17)], MON)
         tue = date(2026, 8, 4)
-        self.assertEqual(attempts, [(tue, 17, booker.COURT_1),
-                                    (tue, 17, booker.COURT_2)])
+        self.assertEqual(attempts, [(tue, 17, booker.COURT_2),
+                                    (tue, 17, booker.COURT_1)])
 
 
 QUOTA_MSG = ("This booking cannot be confirmed because it would mean that your quota "
@@ -200,18 +200,19 @@ class BuildWeekTargetsTest(unittest.TestCase):
         # (weekday, hour) -> account, as specified by the user.
         by_slot = {(attempts[0][0].weekday(), attempts[0][1]): account
                    for _, account, attempts in self.targets}
-        self.assertEqual(by_slot[(0, 9)], 2)    # Mon 09:00 -> A2
-        self.assertEqual(by_slot[(1, 10)], 1)   # Tue 10:00 -> A1
+        self.assertEqual(by_slot[(1, 16)], 1)   # Tue 16:00 -> A1
         self.assertEqual(by_slot[(1, 17)], 1)   # Tue 17:00 -> A1
-        self.assertEqual(by_slot[(2, 10)], 1)   # Wed 10:00 -> A1
-        self.assertEqual(by_slot[(4, 16)], 2)   # Fri 16:00 -> A2
-        self.assertEqual(by_slot[(5, 17)], 2)   # Sat 17:00 -> A2
-        self.assertEqual(by_slot[(6, 10)], 3)   # Sun 10:00 -> A3
+        self.assertEqual(by_slot[(2, 9)], 1)    # Wed 09:00 -> A1
+        self.assertEqual(by_slot[(3, 16)], 2)   # Thu 16:00 -> A2
+        self.assertEqual(by_slot[(3, 17)], 2)   # Thu 17:00 -> A2
+        self.assertEqual(by_slot[(5, 10)], 2)   # Sat 10:00 -> A2
+        self.assertEqual(by_slot[(5, 11)], 3)   # Sat 11:00 -> A3
+        self.assertEqual(by_slot[(5, 17)], 3)   # Sat 17:00 -> A3
 
-    def test_each_target_tries_court1_then_court2(self):
+    def test_each_target_tries_court2_then_court1(self):
         for _, _, attempts in self.targets:
             self.assertEqual([a[2] for a in attempts],
-                             [booker.COURT_1, booker.COURT_2])
+                             [booker.COURT_2, booker.COURT_1])
 
     def test_no_account_exceeds_the_weekly_quota_of_three(self):
         counts = {}

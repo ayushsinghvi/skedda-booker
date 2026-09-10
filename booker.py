@@ -45,7 +45,7 @@ BOOKING_PAGE = f"{VENUE}/booking"
 MANILA = ZoneInfo("Asia/Manila")
 COURT_1 = "1399963"   # Tennis Court 1
 COURT_2 = "1399964"   # Tennis Court 2
-COURTS = [COURT_1, COURT_2]   # court doesn't matter; try 1 then 2 at each slot
+COURTS = [COURT_2, COURT_1]   # prefer Court 2; fall back to Court 1 at each slot
 SESSION_FILE = os.environ.get("SKEDDA_SESSION_FILE", ".session.json")
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120 Safari/537.36")
@@ -222,7 +222,7 @@ def wait_until(hms, tz=MANILA):
 def build_attempts(slots, week_monday):
     """Expand (weekday_index, hour) slots into concrete (date, hour, space_id) attempts.
 
-    Each slot yields one attempt per court (Court 1 then Court 2), so the interleaved
+    Each slot yields one attempt per court (Court 2 then Court 1), so the interleaved
     loop advances court-by-court then candidate-by-candidate through this flat list.
     """
     attempts = []
@@ -278,7 +278,7 @@ def build_week_targets(monday):
     """Expand WEEKLY_PLAN into (name, account, attempts) targets for the target week.
 
     Each plan entry becomes one target owning a single (day, hour) slot; attempts are
-    the two courts tried in order (Court 1 then Court 2). The account travels with the
+    the two courts tried in order (Court 2 then Court 1). The account travels with the
     target so the run loop dispatches its bookings to the right session. Distinct slots
     are guaranteed by the plan, so there is no cross-target day exclusion — one account
     can legitimately hold two slots on the same day.

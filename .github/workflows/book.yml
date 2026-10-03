@@ -1,0 +1,73 @@
+name: Weekly Skedda booking
+
+on:
+  schedule:
+    # Thu 00:15 UTC = Thu 08:15 Manila. GitHub cron often starts late, so fire
+    # early; the job waits until 08:55 to log in and booker.py waits to 09:00:00.
+    - cron: "15 0 * * 4"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry-run = log in + print plan (no bookings); live = race now"
+        type: choice
+        options: [dry-run, live]
+        default: dry-run
+
+concurrency:
+  group: skedda-booking
+  cancel-in-progress: false
+
+jobs:
+  book:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests python-dotenv
+
+      - name: Write .env from secrets
+        env:
+          SKEDDA_EMAIL_1: ${{ secrets.SKEDDA_EMAIL_1 }}
+          SKEDDA_PASSWORD_1: ${{ secrets.SKEDDA_PASSWORD_1 }}
+          SKEDDA_EMAIL_2: ${{ secrets.SKEDDA_EMAIL_2 }}
+          SKEDDA_PASSWORD_2: ${{ secrets.SKEDDA_PASSWORD_2 }}
+          SKEDDA_EMAIL_3: ${{ secrets.SKEDDA_EMAIL_3 }}
+          SKEDDA_PASSWORD_3: ${{ secrets.SKEDDA_PASSWORD_3 }}
+        shell: python
+        run: |
+          import os
+          lines = ["SKEDDA_VENUE=ksmbooking"]
+          for i in (1, 2, 3):
+              for key in (f"SKEDDA_EMAIL_{i}", f"SKEDDA_PASSWORD_{i}"):
+                  v = os.environ.get(key, "").replace("\\", "\\\\").replace("'", "\\'")
+                  lines.append(f"{key}='{v}'")
+          fd = os.open(".env", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+          with os.fdopen(fd, "w") as f:
+              f.write("\n".join(lines) + "\n")
+
+      - name: Wait until 08:55 Manila
+        if: github.event_name == 'schedule'
+        run: |
+          target=$(TZ=Asia/Manila date -d "08:55" +%s)
+          now=$(date +%s)
+          if [ "$now" -lt "$target" ]; then
+            echo "sleeping $((target - now))s until 08:55 Manila"
+            sleep $((target - now))
+          fi
+
+      - name: Log in
+        run: python booker.py login
+
+      - name: Dry run
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'dry-run'
+        run: python booker.py run --dry-run
+
+      - name: Book
+        if: github.event_name == 'schedule' || inputs.mode == 'live'
+        run: python booker.py run

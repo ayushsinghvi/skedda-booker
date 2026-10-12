@@ -1,37 +1,66 @@
 name: Weekly Skedda booking
+run-name: Weekly booking (${{ inputs.mode || 'scheduled' }})
 
 on:
   schedule:
-    # Thu 00:15 UTC = Thu 08:15 Manila. GitHub cron often starts late, so fire
-    # early; the job waits until 08:55 to log in and booker.py waits to 09:00:00.
+    # Thu 00:15 UTC = Thu 08:15 Manila. Backup trigger: GitHub cron can start late
+    # or be dropped, so the primary trigger is cron-job.org at 08:30 Manila, which
+    # dispatches this workflow with mode=scheduled.
     - cron: "15 0 * * 4"
   workflow_dispatch:
     inputs:
       mode:
-        description: "dry-run = log in + print plan (no bookings); live = race now"
+        description: "dry-run = log in + print plan (no bookings); live = race now; scheduled = wait for 09:00 release"
         type: choice
-        options: [dry-run, live]
+        options: [dry-run, live, scheduled]
         default: dry-run
 
+# Runs queue one at a time, so a backup trigger always sees the earlier run's result.
 concurrency:
   group: skedda-booking
   cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
 
 jobs:
   book:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      SCHEDULED: ${{ github.event_name == 'schedule' || inputs.mode == 'scheduled' }}
     steps:
+      # A backup trigger must not re-run the race after an earlier run already booked:
+      # the plan would hit "conflicts" on its own bookings and fall back to the other court.
+      - name: Skip if this week's booking already succeeded
+        id: guard
+        if: env.SCHEDULED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          since=$(date -u +%Y-%m-%dT00:00:00Z)
+          done=$(gh api "repos/${{ github.repository }}/actions/workflows/book.yml/runs?created=>=$since&status=success" \
+            --jq '[.workflow_runs[] | select(.id != ${{ github.run_id }} and (.display_title | endswith("(scheduled)")))] | length')
+          if [ "$done" -gt 0 ]; then
+            echo "an earlier scheduled run today already succeeded; skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.guard.outputs.skip != 'true'
 
       - uses: actions/setup-python@v5
+        if: steps.guard.outputs.skip != 'true'
         with:
           python-version: "3.12"
 
       - name: Install dependencies
+        if: steps.guard.outputs.skip != 'true'
         run: pip install requests python-dotenv
 
       - name: Write .env from secrets
+        if: steps.guard.outputs.skip != 'true'
         env:
           SKEDDA_EMAIL_1: ${{ secrets.SKEDDA_EMAIL_1 }}
           SKEDDA_PASSWORD_1: ${{ secrets.SKEDDA_PASSWORD_1 }}
@@ -52,7 +81,7 @@ jobs:
               f.write("\n".join(lines) + "\n")
 
       - name: Wait until 08:55 Manila
-        if: github.event_name == 'schedule'
+        if: env.SCHEDULED == 'true' && steps.guard.outputs.skip != 'true'
         run: |
           target=$(TZ=Asia/Manila date -d "08:55" +%s)
           now=$(date +%s)
@@ -62,12 +91,13 @@ jobs:
           fi
 
       - name: Log in
+        if: steps.guard.outputs.skip != 'true'
         run: python booker.py login
 
       - name: Dry run
-        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'dry-run'
+        if: inputs.mode == 'dry-run'
         run: python booker.py run --dry-run
 
       - name: Book
-        if: github.event_name == 'schedule' || inputs.mode == 'live'
+        if: (env.SCHEDULED == 'true' && steps.guard.outputs.skip != 'true') || inputs.mode == 'live'
         run: python booker.py run

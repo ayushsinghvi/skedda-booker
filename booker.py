@@ -261,12 +261,13 @@ def classify(status, text):
 # The weekly booking plan: an explicit, ordered sequence of (weekday, hour, account)
 # assignments. weekday uses date.weekday() (Mon=0 .. Sun=6); account is 1-based into
 # the accounts list from load_accounts(). Each account may hold at most 3 bookings/week
-# (Skedda quota), so no account appears more than three times below.
+# (Skedda quota), so no account appears more than three times below. Accounts rotate
+# round-robin (1, 2, 3, 1, 2, 3) across the slots in order.
 WEEKLY_PLAN = [
     (1, 16, 1),   # Tue 16:00 — Account 1
-    (1, 17, 1),   # Tue 17:00 — Account 1
-    (3, 16, 2),   # Thu 16:00 — Account 2
-    (3, 17, 2),   # Thu 17:00 — Account 2
+    (1, 17, 2),   # Tue 17:00 — Account 2
+    (3, 16, 3),   # Thu 16:00 — Account 3
+    (3, 17, 1),   # Thu 17:00 — Account 1
     (5, 10, 2),   # Sat 10:00 — Account 2
     (5, 11, 3),   # Sat 11:00 — Account 3
 ]

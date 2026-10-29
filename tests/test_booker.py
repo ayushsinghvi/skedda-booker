@@ -202,12 +202,10 @@ class BuildWeekTargetsTest(unittest.TestCase):
                    for _, account, attempts in self.targets}
         self.assertEqual(by_slot[(1, 16)], 1)   # Tue 16:00 -> A1
         self.assertEqual(by_slot[(1, 17)], 1)   # Tue 17:00 -> A1
-        self.assertEqual(by_slot[(2, 9)], 1)    # Wed 09:00 -> A1
         self.assertEqual(by_slot[(3, 16)], 2)   # Thu 16:00 -> A2
         self.assertEqual(by_slot[(3, 17)], 2)   # Thu 17:00 -> A2
         self.assertEqual(by_slot[(5, 10)], 2)   # Sat 10:00 -> A2
         self.assertEqual(by_slot[(5, 11)], 3)   # Sat 11:00 -> A3
-        self.assertEqual(by_slot[(5, 17)], 3)   # Sat 17:00 -> A3
 
     def test_each_target_tries_court2_then_court1(self):
         for _, _, attempts in self.targets:

@@ -265,12 +265,10 @@ def classify(status, text):
 WEEKLY_PLAN = [
     (1, 16, 1),   # Tue 16:00 — Account 1
     (1, 17, 1),   # Tue 17:00 — Account 1
-    (2, 9,  1),   # Wed 09:00 — Account 1
     (3, 16, 2),   # Thu 16:00 — Account 2
     (3, 17, 2),   # Thu 17:00 — Account 2
     (5, 10, 2),   # Sat 10:00 — Account 2
     (5, 11, 3),   # Sat 11:00 — Account 3
-    (5, 17, 3),   # Sat 17:00 — Account 3
 ]
 
 

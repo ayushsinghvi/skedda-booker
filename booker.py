@@ -9,7 +9,8 @@ persists all their sessions (auth cookies + antiforgery token + venue context) t
 
 `run` fires WEEKLY_PLAN — an explicit sequence of (weekday, hour, account) slots — as an
 interleaved race at the weekly release, dispatching each slot's booking to its assigned
-account (each account capped at Skedda's 3-bookings-per-week quota).
+account (each account capped at Skedda's 3-bookings-per-week quota). A slot that can't
+be had on either court falls back to the next unclaimed FALLBACK_SLOTS entry.
 
 Discovered contract for Kerry Sports Manila (ksmbooking):
   login:  GET  app.skedda.com/account/login         -> antiforgery cookie + token
@@ -272,6 +273,17 @@ WEEKLY_PLAN = [
     (5, 11, 3),   # Sat 11:00 — Account 3
 ]
 
+# Shared fallback pool, as (weekday, hour), in preference order. When a planned slot is
+# taken on both courts, its target (same account) claims the next unclaimed entry here.
+FALLBACK_SLOTS = [
+    (5, 12),   # Sat 12:00
+    (5, 13),   # Sat 13:00
+    (6, 10),   # Sun 10:00
+    (6, 11),   # Sun 11:00
+    (6, 12),   # Sun 12:00
+    (6, 13),   # Sun 13:00
+]
+
 
 def build_week_targets(monday):
     """Expand WEEKLY_PLAN into (name, account, attempts) targets for the target week.
@@ -287,7 +299,13 @@ def build_week_targets(monday):
             for wd, hour, account in WEEKLY_PLAN]
 
 
-def run_targets(targets, attempt_fn, is_expired, sleep_fn=time.sleep, tick_seconds=2):
+def build_week_fallbacks(monday):
+    """Expand FALLBACK_SLOTS into one attempts list (both courts) per fallback slot."""
+    return [build_attempts([slot], monday) for slot in FALLBACK_SLOTS]
+
+
+def run_targets(targets, attempt_fn, is_expired, sleep_fn=time.sleep, tick_seconds=2,
+                fallbacks=None):
     """Interleaved booking loop — concurrent in effect, sequential in execution.
 
     `targets` is a list of (name, account, attempts); attempts is an ordered list of
@@ -302,10 +320,16 @@ def run_targets(targets, attempt_fn, is_expired, sleep_fn=time.sleep, tick_secon
     -> stay on the same candidate and try again next tick. Runs until every target is
     resolved or is_expired() (the deadline) fires.
 
+    `fallbacks` is a shared, ordered pool of attempts lists (from build_week_fallbacks).
+    When a target exhausts its attempts it claims the next unclaimed pool entry and keeps
+    going on its own account; each entry is claimed by at most one target.
+
     Returns a list of {name, account, booked, reason} — reason in
     {booked, exhausted, quota, expired}.
     """
     n = len(targets)
+    current = [list(t[2]) for t in targets]
+    pool = list(fallbacks or [])
     idx = [0] * n
     done = [False] * n
     booked = [None] * n
@@ -317,16 +341,18 @@ def run_targets(targets, attempt_fn, is_expired, sleep_fn=time.sleep, tick_secon
                 if not done[i]:
                     done[i], reason[i] = True, "expired"
             break
-        for i, (name, account, attempts) in enumerate(targets):
+        for i, (name, account, _) in enumerate(targets):
             if done[i]:
                 continue
-            if idx[i] >= len(attempts):
-                done[i], reason[i] = True, "exhausted"
-                continue
-            d, hour, space = attempts[idx[i]]
+            if idx[i] >= len(current[i]):
+                if not pool:
+                    done[i], reason[i] = True, "exhausted"
+                    continue
+                current[i], idx[i] = pool.pop(0), 0
+            d, hour, space = current[i][idx[i]]
             outcome = classify(*attempt_fn(account, d, hour, space))
             if outcome == "booked":
-                booked[i], done[i], reason[i] = attempts[idx[i]], True, "booked"
+                booked[i], done[i], reason[i] = current[i][idx[i]], True, "booked"
             elif outcome == "collision":
                 idx[i] += 1
             elif outcome == "quota":
@@ -458,6 +484,7 @@ def cmd_run(args):
     monday = following_week()[0]
     sunday = monday + timedelta(days=6)
     targets = build_week_targets(monday)
+    fallbacks = build_week_fallbacks(monday)
     print(f"# target week {monday.isoformat()} (Mon) .. {sunday.isoformat()} (Sun)",
           file=sys.stderr)
 
@@ -465,6 +492,8 @@ def cmd_run(args):
         for name, account, attempts in targets:
             print(f"[A{account}] {name}: "
                   f"{', '.join(COURT_NAMES.get(a[2], a[2]) for a in attempts)}")
+        print("fallbacks: " + ", ".join(f"{DAY_NAMES[wd]} {hour:02d}:00"
+                                        for wd, hour in FALLBACK_SLOTS))
         return 0
 
     needed = {account for _, account, _ in targets}
@@ -488,7 +517,7 @@ def cmd_run(args):
           file=sys.stderr)
     results = run_targets(targets, attempt_fn,
                           is_expired=lambda: datetime.now(MANILA) >= deadline,
-                          tick_seconds=args.tick)
+                          tick_seconds=args.tick, fallbacks=fallbacks)
 
     booked = 0
     for r in results:

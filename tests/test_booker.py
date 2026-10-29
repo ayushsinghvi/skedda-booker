@@ -182,6 +182,41 @@ class RunTargetsTest(unittest.TestCase):
         self.assertIsNone(results[0]["booked"])
         self.assertEqual(results[0]["reason"], "expired")
 
+    def test_exhausted_target_falls_back_on_its_own_account(self):
+        SAT = date(2026, 8, 8)
+        seen = []
+
+        def attempt(acct, d, h, s):
+            seen.append((acct, d, h))
+            return COLLISION if d == TUE else OK
+
+        results = booker.run_targets(
+            [("Tue 17:00", 2, [(TUE, 17, booker.COURT_1)])],
+            attempt_fn=attempt, is_expired=NeverExpires(), sleep_fn=self.sleep,
+            fallbacks=[[(SAT, 12, booker.COURT_2)]])
+        self.assertEqual(results[0]["booked"], (SAT, 12, booker.COURT_2))
+        self.assertEqual(seen[-1], (2, SAT, 12))
+
+    def test_each_fallback_is_claimed_by_one_target_only(self):
+        SAT = date(2026, 8, 8)
+        results = booker.run_targets(
+            [("Tue 16:00", 1, [(TUE, 16, booker.COURT_1)]),
+             ("Tue 17:00", 2, [(TUE, 17, booker.COURT_1)])],
+            attempt_fn=lambda acct, d, h, s: COLLISION if d == TUE else OK,
+            is_expired=NeverExpires(), sleep_fn=self.sleep,
+            fallbacks=[[(SAT, 12, booker.COURT_2)], [(SAT, 13, booker.COURT_2)]])
+        self.assertEqual(results[0]["booked"], (SAT, 12, booker.COURT_2))
+        self.assertEqual(results[1]["booked"], (SAT, 13, booker.COURT_2))
+
+    def test_exhausted_when_fallback_pool_runs_out(self):
+        results = booker.run_targets(
+            [("Tue 17:00", 1, [(TUE, 17, booker.COURT_1)])],
+            attempt_fn=lambda acct, d, h, s: COLLISION,
+            is_expired=NeverExpires(), sleep_fn=self.sleep,
+            fallbacks=[[(FRI, 12, booker.COURT_1)]])
+        self.assertIsNone(results[0]["booked"])
+        self.assertEqual(results[0]["reason"], "exhausted")
+
 
 class BuildWeekTargetsTest(unittest.TestCase):
     def setUp(self):

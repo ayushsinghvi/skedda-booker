@@ -219,16 +219,17 @@ def wait_until(hms, tz=MANILA):
         time.sleep(delay)
 
 
-def build_attempts(slots, week_monday):
+def build_attempts(slots, week_monday, courts=COURTS):
     """Expand (weekday_index, hour) slots into concrete (date, hour, space_id) attempts.
 
-    Each slot yields one attempt per court (Court 2 then Court 1), so the interleaved
-    loop advances court-by-court then candidate-by-candidate through this flat list.
+    Each slot yields one attempt per court in `courts` order (default Court 2 then
+    Court 1), so the interleaved loop advances court-by-court then candidate-by-candidate
+    through this flat list.
     """
     attempts = []
     for wd, hour in slots:
         d = week_monday + timedelta(days=wd)
-        for court in COURTS:
+        for court in courts:
             attempts.append((d, hour, court))
     return attempts
 
@@ -262,14 +263,15 @@ def classify(status, text):
 # assignments. weekday uses date.weekday() (Mon=0 .. Sun=6); account is 1-based into
 # the accounts list from load_accounts(). Each account may hold at most 3 bookings/week
 # (Skedda quota), so no account appears more than three times below. Accounts rotate
-# round-robin (1, 2, 3, 1, 2, 3) across the slots in order.
+# round-robin (1, 2, 3, 1, 2, 3) across the slots in order. An optional 4th element
+# overrides the court order for that slot.
 WEEKLY_PLAN = [
     (1, 16, 1),   # Tue 16:00 — Account 1
     (1, 17, 2),   # Tue 17:00 — Account 2
     (3, 16, 3),   # Thu 16:00 — Account 3
     (3, 17, 1),   # Thu 17:00 — Account 1
-    (5, 10, 2),   # Sat 10:00 — Account 2
-    (5, 11, 3),   # Sat 11:00 — Account 3
+    (5, 10, 2, [COURT_1, COURT_2]),   # Sat 10:00 — Account 2, Court 1 first
+    (5, 11, 3, [COURT_1, COURT_2]),   # Sat 11:00 — Account 3, Court 1 first
 ]
 
 
@@ -277,14 +279,15 @@ def build_week_targets(monday):
     """Expand WEEKLY_PLAN into (name, account, attempts) targets for the target week.
 
     Each plan entry becomes one target owning a single (day, hour) slot; attempts are
-    the two courts tried in order (Court 2 then Court 1). The account travels with the
+    the two courts tried in order (Court 2 then Court 1, unless the entry overrides
+    it). The account travels with the
     target so the run loop dispatches its bookings to the right session. Distinct slots
     are guaranteed by the plan, so there is no cross-target day exclusion — one account
     can legitimately hold two slots on the same day.
     """
     return [(f"{DAY_NAMES[wd]} {hour:02d}:00", account,
-             build_attempts([(wd, hour)], monday))
-            for wd, hour, account in WEEKLY_PLAN]
+             build_attempts([(wd, hour)], monday, *courts))
+            for wd, hour, account, *courts in WEEKLY_PLAN]
 
 
 def run_targets(targets, attempt_fn, is_expired, sleep_fn=time.sleep, tick_seconds=2):

@@ -207,10 +207,13 @@ class BuildWeekTargetsTest(unittest.TestCase):
         self.assertEqual(by_slot[(5, 10)], 2)   # Sat 10:00 -> A2
         self.assertEqual(by_slot[(5, 11)], 3)   # Sat 11:00 -> A3
 
-    def test_each_target_tries_court2_then_court1(self):
+    def test_court_order_per_target(self):
+        # Saturday slots prefer Court 1; everything else prefers Court 2.
         for _, _, attempts in self.targets:
-            self.assertEqual([a[2] for a in attempts],
-                             [booker.COURT_2, booker.COURT_1])
+            expected = ([booker.COURT_1, booker.COURT_2]
+                        if attempts[0][0].weekday() == 5
+                        else [booker.COURT_2, booker.COURT_1])
+            self.assertEqual([a[2] for a in attempts], expected)
 
     def test_no_account_exceeds_the_weekly_quota_of_three(self):
         counts = {}
